@@ -89,6 +89,13 @@ def process_audio(
         print("[PIPELINE] empty transcript")
         dispatch("unknown")
         return "unknown"
+    # If we need using model confidence to LLM, by replacing 2,and 3 with the next edit  .
+        # Step 2 — LLM matching (always used)
+        # clf = GemmaClassifier(model_path=gemma_model)
+        # result = clf.classify(transcript.text)
+        # intent = result.intent
+        # print(f"[GEMMA]  intent={intent}  confidence={result.confidence:.2f}")
+
 
     # Step 2 — Fast keyword match
     intent = fast_match(transcript.text)
