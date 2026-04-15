@@ -12,3 +12,24 @@ dependencies = [
     "torch>=2.11.0",
     "transformers>=5.5.3",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    # Block ROS2 pytest plugins that conflict with this pytest version.
+    "-p", "no:launch_testing",
+    "-p", "no:launch_ros",
+    "-p", "no:ament_copyright",
+    "-p", "no:ament_pep257",
+    "-p", "no:ament_flake8",
+    "-p", "no:ament_lint",
+    "-p", "no:ament_xmllint",
+]
+markers = [
+    "integration: tests that require local model files (skipped by default)",
+]
