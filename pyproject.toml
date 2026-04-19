@@ -8,6 +8,7 @@ dependencies = [
     "accelerate>=1.13.0",
     "faster-whisper>=1.2.1",
     "numpy>=2.4.4",
+    "paho-mqtt>=2.1.0",
     "sentencepiece>=0.2.1",
     "torch>=2.11.0",
     "transformers>=5.5.3",

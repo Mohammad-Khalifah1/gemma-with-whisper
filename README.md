@@ -6,6 +6,42 @@ An offline, bilingual (Arabic + English) voice assistant that controls a smart l
 
 ## How It Works
 
+The pipeline supports three modes selectable via `--mode` at runtime:
+
+### Mode A — Gemma only (current, maximum accuracy)
+
+Every transcript is classified by the LLM regardless of how obvious the command is.
+Best when accuracy matters more than response time.
+
+```
+PCM audio file
+      │
+      ▼
+┌─────────────┐
+│ WhisperSTT  │  Speech-to-Text  (faster-whisper, CPU, int8)
+└──────┬──────┘
+       │  transcript text
+       ▼
+┌──────────────────┐
+│ GemmaClassifier  │  LLM intent classification  (Gemma 4 2B, CPU)
+└────────┬─────────┘
+         │  intent  (light_on | light_off | unknown)
+         ▼
+   ┌──────────┐
+   │ dispatch │  Calls the action handler for the intent
+   └──────────┘
+         │
+         ▼
+  print to stdout        ← current behaviour
+  mqtt_client.publish()  ← future behaviour (ESP32)
+```
+
+### Mode B — fast_match first, Gemma as fallback (faster response)
+
+Common commands are matched instantly via keyword lookup.
+Gemma is only loaded when no keyword matches.
+Best for IoT real-time control where commands are predictable.
+
 ```
 PCM audio file
       │
@@ -39,6 +75,69 @@ PCM audio file
    mqtt_client.publish()  ← future behaviour (ESP32)
 ```
 
+To switch to Mode B, replace the classification block in `main.py`:
+
+```python
+# Mode B — uncomment this block and remove the Gemma-only block below it
+intent = fast_match(transcript.text)
+if intent is not None:
+    print(f"[FAST]  intent={intent}  (keyword match, no LLM)")
+else:
+    clf = GemmaClassifier(model_path=gemma_model)
+    result = clf.classify(transcript.text)
+    intent = result.intent
+    print(f"[GEMMA] intent={intent}  confidence={result.confidence:.2f}")
+```
+
+### Mode C — MQTT (production IoT mode)
+
+The system connects to an MQTT broker, listens for raw PCM audio published by
+the ESP32 on `home/voice/pcm`, runs the full pipeline, then publishes the light
+command back to the ESP32 on `home/light/cmd`.  No PCM file path is needed —
+audio arrives over the network in real time.
+
+```
+ESP32 microphone
+      │  raw PCM bytes  →  home/voice/pcm
+      ▼
+┌──────────────┐
+│  MQTT Broker │  (e.g. Mosquitto on Raspberry Pi)
+└──────┬───────┘
+       │  home/voice/pcm payload
+       ▼
+┌──────────────────────────────────────┐
+│  MQTTClient.start_voice_listener()   │  writes PCM to temp file
+└──────────────┬───────────────────────┘
+               │  temp PCM path
+               ▼
+        process_audio()               ← same pipeline as Mode A / B
+               │  intent
+               ▼
+        dispatch(intent)
+               │
+               ▼
+┌──────────────────────────────────────┐
+│  MQTTClient.publish_light("ON/OFF")  │  home/light/cmd → ESP32 relay
+└──────────────────────────────────────┘
+```
+
+```bash
+# Start MQTT mode
+uv run python main.py --mode mqtt --broker 192.168.1.100
+
+# Optional: override port and models
+uv run python main.py --mode mqtt --broker 192.168.1.100 --port 1883 \
+    --whisper-model ./models/whisper --gemma-model ./models/gemma4_2b
+```
+
+**MQTT topic convention:**
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `home/voice/pcm` | ESP32 → AI | Raw PCM bytes (int16, 16 kHz, mono) |
+| `home/light/cmd` | AI → ESP32 | `{"state": "ON"}` / `{"state": "OFF"}` |
+| `home/status` | AI → Broker | `{"status": "OK/ERROR", "intent": "..."}` |
+
 **Two supported intents:**
 
 | Intent | Arabic examples | English examples |
@@ -52,19 +151,21 @@ PCM audio file
 
 ```
 gemma/
-├── main.py                      # Entry point — CLI and future MQTT listener
+├── main.py                      # Entry point — cli mode and mqtt mode
 ├── src/
 │   ├── __init__.py
 │   ├── whisper_stt.py           # WhisperSTT class  →  TranscriptResult
 │   ├── gemma_classifier.py      # GemmaClassifier class  →  IntentResult
 │   ├── intent_router.py         # fast_match(), get_command(), STORED_VALUES
-│   └── actions.py               # Action handlers + dispatch table
+│   ├── actions.py               # Action handlers + dispatch + configure_mqtt()
+│   └── mqtt_client.py           # MQTTClient — connect, publish, voice listener
 ├── tests/
 │   ├── convert_to_pcm.py        # Audio → PCM converter (test utility)
 │   ├── test_whisper_stt.py      # WhisperSTT unit + integration tests
 │   ├── test_gemma_classifier.py # GemmaClassifier unit + integration tests
 │   ├── test_intent_router.py    # fast_match / get_command tests
-│   └── test_actions.py          # Action handler / dispatch tests
+│   ├── test_actions.py          # Action handler / dispatch tests
+│   └── test_mqtt_client.py      # MQTTClient + MQTT transport tests
 ├── voice_samples/
 │   ├── *.wav                    # Raw audio samples
 │   └── pcm/                     # Converted PCM files (generated)
@@ -100,18 +201,15 @@ sudo apt install ffmpeg
 
 ## Running
 
-### Single audio file
+### Mode A / B — CLI (pass a PCM file)
 
 ```bash
+# Basic
 uv run python main.py --pcm voice_samples/pcm/speech.pcm
-```
 
-```bash
 # Force a specific language (ar or en). Default: auto-detect.
 uv run python main.py --pcm voice_samples/pcm/speech.pcm --language ar
-```
 
-```bash
 # Override model paths
 uv run python main.py \
   --pcm voice_samples/pcm/speech.pcm \
@@ -119,18 +217,32 @@ uv run python main.py \
   --gemma-model   ./models/gemma4_2b
 ```
 
-**All CLI arguments:**
+### Mode C — MQTT (receive audio from ESP32)
 
-| Argument | Default | Description |
-|---|---|---|
-| `--pcm` | *(required)* | Path to raw PCM file |
-| `--sample-rate` | `16000` | PCM sample rate in Hz |
-| `--channels` | `1` | Number of audio channels |
-| `--language` | auto-detect | BCP-47 language hint (`ar`, `en`, …) |
-| `--whisper-model` | `./models/whisper` | Local Whisper model path |
-| `--gemma-model` | `./models/gemma4_2b` | Local Gemma 4 model path |
+```bash
+# Connect to broker and start listening
+uv run python main.py --mode mqtt --broker 192.168.1.100
 
-### Run all voice samples
+# With custom port and models
+uv run python main.py --mode mqtt --broker 192.168.1.100 --port 1883 \
+  --whisper-model ./models/whisper --gemma-model ./models/gemma4_2b
+```
+
+**All arguments:**
+
+| Argument | Default | Modes | Description |
+|---|---|---|---|
+| `--mode` | `cli` | all | `cli` or `mqtt` |
+| `--pcm` | *(required in cli)* | cli | Path to raw PCM file |
+| `--broker` | `192.168.1.100` | mqtt | MQTT broker IP address |
+| `--port` | `1883` | mqtt | MQTT broker port |
+| `--sample-rate` | `16000` | all | PCM sample rate in Hz |
+| `--channels` | `1` | all | Number of audio channels |
+| `--language` | auto-detect | all | BCP-47 hint (`ar`, `en`, …) |
+| `--whisper-model` | `./models/whisper` | all | Local Whisper model path |
+| `--gemma-model` | `./models/gemma4_2b` | all | Local Gemma 4 model path |
+
+### Run all voice samples (CLI)
 
 ```bash
 for f in voice_samples/pcm/*.pcm; do
