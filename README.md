@@ -411,6 +411,48 @@ uv add paho-mqtt
 
 ---
 
+## ESP32 Integration Requirements
+
+This section describes what the ESP32 firmware must implement to work with this system.
+
+### Infrastructure
+
+Install a MQTT broker (e.g. Mosquitto) on a Raspberry Pi or any Linux machine on the same network:
+
+```bash
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl enable --now mosquitto
+```
+
+### Audio publisher (ESP32 → AI)
+
+The ESP32 must capture microphone audio and publish it to `home/voice/pcm`:
+
+- Read microphone at **16000 Hz, mono, 16-bit signed int (little-endian)**
+- Publish the **raw PCM bytes only** — no WAV header, no container
+- Send a complete clip per message (not a stream) — triggered by a button press or silence detection
+
+### Command subscriber (ESP32 → Relay)
+
+The ESP32 must subscribe to `home/light/cmd` and control the relay:
+
+- Subscribe to `home/light/cmd`
+- Parse the JSON payload: `{"state": "ON", "timestamp": "2025-..."}`
+- Read `state` only — ignore `timestamp`
+- Toggle the relay: `"ON"` → relay closed, `"OFF"` → relay open
+
+### PCM audio format
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 16000 Hz |
+| Channels | 1 (mono) |
+| Bit depth | 16-bit signed integer |
+| Byte order | little-endian |
+| Container | **none** — raw PCM bytes only, no WAV header |
+
+---
+
 ## STT Accuracy Notes
 
 Whisper is tuned for short voice commands with the following settings:
