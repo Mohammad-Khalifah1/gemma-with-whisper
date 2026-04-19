@@ -1,69 +1,79 @@
 """
 Action handlers — one function per intent.
 
-Each handler is the single integration point between the AI pipeline and the
-physical device (ESP32).  Today every handler prints to stdout.  When MQTT
-support is added, replace the print() call with mqtt_client.publish() — the
-rest of the pipeline stays untouched.
+Two transport modes are supported:
 
-MQTT integration plan
----------------------
-1. Install: uv add paho-mqtt
-2. Create an MqttClient wrapper (e.g. src/mqtt_client.py) that connects to the
-   broker and exposes a publish(topic, payload) method.
-3. Import the client here and replace each TODO block with the publish call.
+  CLI mode (default)
+      Each handler prints to stdout.  No external dependencies.
 
-Example future body for handle_light_on():
-    mqtt_client.publish(TOPIC_LIGHT, json.dumps({"state": "ON"}))
+  MQTT mode
+      Call configure_mqtt(client) once at startup.  After that every handler
+      publishes to the broker instead of printing, so the ESP32 receives the
+      command directly.  The rest of the pipeline is untouched.
+
+Switching modes:
+    from src.actions import configure_mqtt
+    from src.mqtt_client import MQTTClient
+
+    mqtt = MQTTClient(broker_host="192.168.1.x")
+    mqtt.connect()
+    configure_mqtt(mqtt)          # swap handlers to MQTT transport
 """
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# MQTT configuration placeholders
-# Uncomment and fill in when adding real broker support.
-# ---------------------------------------------------------------------------
-# BROKER_HOST  = "192.168.1.x"
-# BROKER_PORT  = 1883
-# TOPIC_LIGHT  = "home/room/light"   # ESP32 subscribes to this topic
+from typing import TYPE_CHECKING, Optional
 
+if TYPE_CHECKING:
+    from src.mqtt_client import MQTTClient
+
+# Active MQTT client — None means CLI / print mode.
+_mqtt: Optional["MQTTClient"] = None
+
+
+def configure_mqtt(client: "MQTTClient") -> None:
+    """Switch all action handlers to MQTT transport.
+
+    Args:
+        client: A connected MQTTClient instance.
+                Pass None to revert to CLI / print mode.
+    """
+    global _mqtt
+    _mqtt = client
+
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
 
 def handle_light_on() -> None:
-    """Execute the 'turn light on' command.
-
-    Current behaviour : prints a confirmation to stdout.
-    Future behaviour  : publishes {"state": "ON"} to the MQTT light topic so
-                        the ESP32 switches the relay on.
-    """
-    # TODO: mqtt_client.publish(TOPIC_LIGHT, '{"state": "ON"}')
-    print("[ACTION] light_on  → LIGHT ON")
+    """Execute the 'turn light on' command."""
+    if _mqtt is not None:
+        _mqtt.publish_light("ON")
+    else:
+        print("[ACTION] light_on  → LIGHT ON")
 
 
 def handle_light_off() -> None:
-    """Execute the 'turn light off' command.
-
-    Current behaviour : prints a confirmation to stdout.
-    Future behaviour  : publishes {"state": "OFF"} to the MQTT light topic so
-                        the ESP32 switches the relay off.
-    """
-    # TODO: mqtt_client.publish(TOPIC_LIGHT, '{"state": "OFF"}')
-    print("[ACTION] light_off → LIGHT OFF")
+    """Execute the 'turn light off' command."""
+    if _mqtt is not None:
+        _mqtt.publish_light("OFF")
+    else:
+        print("[ACTION] light_off → LIGHT OFF")
 
 
 def handle_unknown() -> None:
-    """Fallback executed when no intent could be identified.
-
-    Current behaviour : prints a warning to stdout.
-    Future behaviour  : optionally publish to a debug/status MQTT topic.
-    """
-    # TODO: mqtt_client.publish(TOPIC_STATUS, '{"error": "unknown_intent"}')
-    print("[ACTION] unknown   → no command sent")
+    """Fallback when no intent could be identified."""
+    if _mqtt is not None:
+        _mqtt.publish_status("OK", intent="unknown")
+    else:
+        print("[ACTION] unknown   → no command sent")
 
 
 # ---------------------------------------------------------------------------
-# Dispatch table — maps each intent string to its handler.
-# Add new intents here without touching the pipeline or main.py.
+# Dispatch table
 # ---------------------------------------------------------------------------
+
 HANDLERS: dict[str, callable] = {
     "light_on":  handle_light_on,
     "light_off": handle_light_off,
@@ -72,13 +82,10 @@ HANDLERS: dict[str, callable] = {
 
 
 def dispatch(intent: str) -> None:
-    """Call the action handler that corresponds to *intent*.
+    """Call the action handler for *intent*, falling back to handle_unknown().
 
     Args:
-        intent: Intent string returned by the pipeline
-                (e.g. "light_on", "light_off", "unknown").
-
-    If the intent is not in HANDLERS, falls back to handle_unknown().
+        intent: Intent string from the pipeline (e.g. "light_on").
     """
     handler = HANDLERS.get(intent, handle_unknown)
     handler()
