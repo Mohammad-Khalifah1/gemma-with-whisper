@@ -18,4 +18,4 @@ models/
 # Virtual environments
 .venv
 
-.vscode/
+.vscode/.marscode/
