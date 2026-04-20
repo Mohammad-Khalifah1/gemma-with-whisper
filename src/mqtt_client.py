@@ -50,36 +50,33 @@ class MQTTClient:
         self,
         broker_host: str = DEFAULT_BROKER_HOST,
         broker_port: int = DEFAULT_BROKER_PORT,
-        client_id: str = "voice-ai",
+        client_id: str = "voice-ai-pc",
     ) -> None:
         self.broker_host = broker_host
         self.broker_port = broker_port
 
-        self._client = mqtt.Client(
-            client_id=client_id,
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        )
+        # Use default callback API (v1) to avoid struct.error in paho-mqtt v2
+        self._client = mqtt.Client(client_id=client_id)
+
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._connected = False
+        self._on_audio_callback: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Connect to the broker (blocking until the ACK is received).
+        """Queue the connection to the broker.
 
-        Raises:
-            ConnectionError: If the broker is unreachable.
+        The actual network connection is established when loop_forever() starts.
         """
         logger.info("Connecting to MQTT broker %s:%s …", self.broker_host, self.broker_port)
         self._client.connect(self.broker_host, self.broker_port, keepalive=60)
-        self._client.loop_start()      # background thread for network I/O
 
     def disconnect(self) -> None:
         """Gracefully disconnect from the broker."""
-        self._client.loop_stop()
         self._client.disconnect()
         logger.info("Disconnected from MQTT broker.")
 
@@ -150,6 +147,8 @@ class MQTTClient:
             sample_rate: Expected PCM sample rate (default 16 000 Hz).
             channels:    Expected number of channels (default 1 = mono).
         """
+        self._on_audio_callback = on_audio
+
         def _on_message(client, userdata, msg):
             if msg.topic != TOPIC_VOICE:
                 return
@@ -163,7 +162,9 @@ class MQTTClient:
                     f.write(msg.payload)
                     tmp_path = f.name
 
+                logger.info("Processing PCM file: %s", tmp_path)
                 on_audio(tmp_path)
+                logger.info("PCM processing completed")
 
             except Exception as exc:
                 logger.exception("Pipeline error: %s", exc)
@@ -176,6 +177,7 @@ class MQTTClient:
                         pass
 
         self._client.on_message = _on_message
+        # Subscribe here and also in on_connect to handle reconnections
         self._client.subscribe(TOPIC_VOICE, qos=1)
         logger.info("Subscribed to %s — waiting for audio …", TOPIC_VOICE)
 
@@ -183,7 +185,8 @@ class MQTTClient:
         """Block and process MQTT events until interrupted (Ctrl-C)."""
         logger.info("MQTT voice listener running. Press Ctrl-C to stop.")
         try:
-            self._client.loop_forever()
+            # retry_first_connection=True handles initial connection failures gracefully
+            self._client.loop_forever(retry_first_connection=True)
         except KeyboardInterrupt:
             logger.info("Shutting down MQTT listener …")
         finally:
@@ -193,14 +196,19 @@ class MQTTClient:
     # Internal callbacks
     # ------------------------------------------------------------------
 
-    def _on_connect(self, client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
+    # Callback API v1 signature (no reason_code, no properties)
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
             self._connected = True
             logger.info("Connected to MQTT broker successfully.")
+            # Re-subscribe on every new connection (handles reconnections)
+            self._client.subscribe(TOPIC_VOICE, qos=1)
+            logger.info("Re-subscribed to %s after connect", TOPIC_VOICE)
         else:
-            logger.error("MQTT connection refused (reason_code=%s).", reason_code)
+            logger.error("MQTT connection refused (rc=%s).", rc)
 
-    def _on_disconnect(self, client, userdata, flags, reason_code, properties):
+    # Callback API v1 signature (no flags, no properties)
+    def _on_disconnect(self, client, userdata, rc):
         self._connected = False
-        if reason_code != 0:
-            logger.warning("Unexpected MQTT disconnection (reason_code=%s).", reason_code)
+        if rc != 0:
+            logger.warning("Unexpected MQTT disconnection (rc=%s).", rc)
